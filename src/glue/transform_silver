@@ -1,0 +1,121 @@
+import sys
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.dynamicframe import DynamicFrame
+from awsglue.job import Job
+from pyspark.sql.functions import col, to_timestamp, year, month, dayofmonth
+from pyspark.sql.types import StructType, StructField, StringType, DoubleType, IntegerType
+
+
+# 1. Initialize
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+# 2. Define schema
+schema = StructType([
+    StructField('location', StructType([
+        StructField('name', StringType()),
+        StructField('region', StringType()),
+        StructField('country', StringType()),
+        StructField('lat', DoubleType()),
+        StructField('lon', DoubleType()),
+        StructField('localtime', StringType())
+    ])),
+    StructField('current', StructType([
+        StructField('temp_c', DoubleType()),
+        StructField('condition', StructType([
+            StructField('text', StringType())
+        ])),
+        StructField('wind_kph', DoubleType()),
+        StructField('wind_degree', DoubleType()),
+        StructField('wind_dir', DoubleType()),
+        StructField('pressure_mb', StringType()),
+        StructField('precip_mm', StringType()),
+        StructField('humidity', IntegerType()),
+        StructField('cloud', IntegerType()),
+        StructField('feelslike_c', DoubleType()),
+        StructField('windchill_c', DoubleType()),
+        StructField('heatindex_c', DoubleType()),
+        StructField('dewpoint_c', DoubleType()),
+        StructField('vis_km', DoubleType()),
+        StructField('uv', DoubleType()),
+        StructField('gust_kph', DoubleType()),
+        StructField('air_quality', StructType([
+            StructField('co', DoubleType()),
+            StructField('no2', DoubleType()),
+            StructField('o3', DoubleType()),
+            StructField('so2', DoubleType()),
+            StructField('pm2_5', DoubleType()),
+            StructField('pm10', DoubleType()),
+            StructField('us-epa-index', DoubleType()),
+            StructField('gb-defra-index', DoubleType())
+        ])),
+    ])),
+])
+
+# 3. Transform
+bronze_df = spark.read.schema(schema).json("s3://weather-data-raw-<account_id>-eu-west-1-an/data/")
+
+# Flatten df
+flat_df = bronze_df.select(
+    col('location.name').alias('location'),
+    col('location.region').alias('region'),
+    col('location.country').alias('country'),
+    col('location.lat').alias('latitude'),
+    col('location.lon').alias('longitude'),
+    col('location.localtime').alias('local_time'),
+    col('current.temp_c').alias('temperature_c'),
+    col('current.condition.text').alias('weather_condition'),
+    col('current.wind_kph').alias('wind_speed_kph'),
+    col('current.wind_degree').alias('wind_degree'),
+    col('current.wind_dir').alias('wind_direction'),
+    col('current.pressure_mb').alias('pressure_mb'),
+    col('current.precip_mm').alias('precipitation_mm'),
+    col('current.humidity').alias('humidity'),
+    col('current.cloud').alias('cloud_cover'),
+    col('current.feelslike_c').alias('feels_like_temperature_c'),
+    col('current.windchill_c').alias('windchill_temperature_c'),
+    col('current.heatindex_c').alias('heatindex_c'),
+    col('current.dewpoint_c').alias('dewpoint_c'),
+    col('current.vis_km').alias('visibility_km'),
+    col('current.uv').alias('uv_index'),
+    col('current.gust_kph').alias('wind_gust_speed_kph'),
+    col('current.air_quality.co').alias('aqi_co'),
+    col('current.air_quality.no2').alias('aqi_no2'),
+    col('current.air_quality.o3').alias('aqi_o3'),
+    col('current.air_quality.so2').alias('aqi_so2'),
+    col('current.air_quality.pm2_5').alias('aqi_pm_2_5'),
+    col('current.air_quality.pm10').alias('aqi_pm_10'),
+    col('current.air_quality.us-epa-index').alias('us_epa_index'),
+    col('current.air_quality.gb-defra-index').alias('uk_defra_index')
+)
+
+# Date
+transformed_df = flat_df.withColumn('local_time', to_timestamp('local_time', 'yyyy-MM-dd HH:mm')) \
+                        .withColumn('year', year('local_time')) \
+                        .withColumn('month', month('local_time')) \
+                        .withColumn('day', dayofmonth('local_time'))
+
+# 4. Load
+# Convert to DynamicFrame for S3
+output_dyf = DynamicFrame.fromDF(transformed_df, glueContext, 'output_dyf')
+
+glueContext.write_dynamic_frame.from_options(
+    frame=output_dyf,
+    connection_type='s3',
+    format='glueparquet',
+    connection_options={
+        'path': 's3://weather-data-processed-<account_id>-eu-west-1-an/',
+        'partitionKeys': ['location', 'year', 'month', 'day']
+    },
+    format_options={'compression': 'snappy'}
+)
+
+# 5. Commit
+job.commit()
