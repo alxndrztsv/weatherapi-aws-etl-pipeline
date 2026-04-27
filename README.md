@@ -93,3 +93,5 @@ This enables efficient querying and automatic partition discovery.
 
 ### Step 10: Query with Athena
 - Use Amazon Athena to query processed data from `weather_db` database.
+
+![CloudWatch Dashboard](assets/athena_query_results.png)
